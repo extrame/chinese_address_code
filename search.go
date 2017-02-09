@@ -19,7 +19,9 @@ import (
 type Location struct {
 	Province string
 	City     string
-	Distinct string
+	County   string
+	Town     string
+	Village  string
 }
 
 var CacheFile = ".chinese_location_code.json"
@@ -48,35 +50,54 @@ var cacheMap map[string]*ProvinceMap
 
 var SearchUrl = "http://www.stats.gov.cn/tjsj/tjbz/tjyqhdmhcxhfdm/2015/"
 
-func read() map[string]*ProvinceMap {
+func read() (map[string]*ProvinceMap, error) {
 	var m = make(map[string]*ProvinceMap)
-	if bts, err := ioutil.ReadFile(CacheFile); err == nil {
-		json.Unmarshal(bts, m)
+	var bts []byte
+	var err error
+	if bts, err = ioutil.ReadFile(CacheFile); err == nil {
+		err = json.Unmarshal(bts, &m)
 	}
-	return m
+	return m, nil
 }
 
 //Search 提供地区编码，返回标准地址
 func Search(code string) (*Location, error) {
+	changed := false
+	defer func() {
+		if changed {
+			write(cacheMap)
+		}
+	}()
+
 	if len(code) < 6 {
 		return nil, errors.New("地区编码位数不足")
 	}
 	ProvinceCode := code[:2]
 	sTypeCode := code[2:4]
+	if sTypeCode == "00" {
+		sTypeCode = "01"
+	}
 	distinctCode := code[4:6]
+	if distinctCode == "00" {
+		distinctCode = "01"
+	}
 	// streetCode := code[6:9]
 	// blockCode := code[9:12]
+	var err error
 	if cacheMap == nil {
-		cacheMap = read()
+		if cacheMap, err = read(); err != nil {
+			return nil, err
+		}
 	}
 
 	var p *ProvinceMap
-	var err error
 	ok := false
 	p, ok = cacheMap[ProvinceCode]
-	changed := false
+
 	if !ok {
-		searchProvince(ProvinceCode, cacheMap)
+		if err = searchProvince(ProvinceCode, cacheMap); err != nil {
+			return nil, err
+		}
 		changed = true
 	}
 	if p, ok = cacheMap[ProvinceCode]; ok {
@@ -85,9 +106,10 @@ func Search(code string) (*Location, error) {
 		if p.Cities == nil {
 			p.Cities = make(map[string]*City)
 		}
+
 		city, ok = p.Cities[ProvinceCode+sTypeCode]
 		if !ok {
-			searchSub(ProvinceCode, ProvinceCode+sTypeCode, p.Cities)
+			searchCity(ProvinceCode, ProvinceCode+sTypeCode, p.Cities)
 			changed = true
 		}
 		if city, ok = p.Cities[ProvinceCode+sTypeCode]; ok {
@@ -102,14 +124,11 @@ func Search(code string) (*Location, error) {
 				changed = true
 			}
 			if distinct, ok = city.Distincts[ProvinceCode+sTypeCode+distinctCode]; ok {
-				if changed {
-					write(cacheMap)
-				}
 
 				return &Location{
 					Province: p.Name,
 					City:     city.Name,
-					Distinct: distinct.Name,
+					County:   distinct.Name,
 				}, nil
 			} else {
 				err = fmt.Errorf("区县代码(%s)不能找到", distinctCode)
@@ -133,32 +152,33 @@ func searchProvince(pCode string, parent map[string]*ProvinceMap) error {
 	})
 }
 
-func searchSub(pCode string, subCode string, parent map[string]*City) error {
-	return search(pCode, subCode, func() Node {
+func searchCity(pCode string, cityCode string, parent map[string]*City) error {
+	return searchDetail(pCode, cityCode, func() Node {
 		return new(City)
 	}, func(code string, data interface{}) {
 		if p, ok := data.(*City); ok {
-			parent[code] = p
+			parent[code[0:4]] = p
 		}
 	})
 }
 
 func searchDistinct(pCode string, subCode string, parent map[string]*DistinctMap) error {
-	return search(pCode, subCode, func() Node {
+	return searchDetail(pCode, subCode, func() Node {
 		return new(DistinctMap)
 	}, func(code string, data interface{}) {
 		if p, ok := data.(*DistinctMap); ok {
-			parent[code] = p
+			fmt.Println(code)
+			parent[code[0:6]] = p
 		}
 	})
 }
 
 func searchStreet(pCode string, subCode string, parent map[string]*StreetMap) error {
-	return search(pCode, subCode, func() Node {
+	return searchDetail(pCode, subCode, func() Node {
 		return new(StreetMap)
 	}, func(code string, data interface{}) {
 		if p, ok := data.(*StreetMap); ok {
-			parent[code] = p
+			parent[code[6:9]] = p
 		}
 	})
 }
@@ -220,7 +240,62 @@ func search(suffix string, pCode string, newNode func() Node, addToParent func(s
 				return
 			}
 		}
-	} else if res.StatusCode >= 300 {
+	} else if err == nil {
+		err = errors.New(res.Status)
+	}
+	return
+}
+
+func searchDetail(suffix string, pCode string, newNode func() Node, addToParent func(string, interface{})) (err error) {
+	var f func(*html.Node) error
+	f = func(n *html.Node) error {
+		if n.Type == html.ElementNode && n.Data == "tr" {
+			var found bool
+			for _, a := range n.Attr {
+				if a.Key == "class" && (a.Val == "citytr" || a.Val == "countytr" || a.Val == "towntr" || a.Val == "villagetr") {
+					found = true
+				}
+			}
+
+			if found {
+				var p = newNode()
+				var code, gbkName string
+				if n.FirstChild.FirstChild.Data == "a" {
+					code = n.FirstChild.FirstChild.FirstChild.Data
+					gbkName = n.LastChild.FirstChild.FirstChild.Data
+				} else {
+					code = n.FirstChild.FirstChild.Data
+					gbkName = n.LastChild.FirstChild.Data
+				}
+
+				if name, err := simplifiedchinese.GBK.NewDecoder().String(gbkName); err == nil {
+					p.SetName(name)
+					addToParent(code, p)
+					return err
+				}
+				return nil
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if err := f(c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var res *http.Response
+	url := SearchUrl
+	if suffix != "" {
+		url += suffix + ".html"
+	}
+	if res, err = http.Get(url); err == nil && res.StatusCode < 300 {
+		var doc *html.Node
+		if doc, err = html.Parse(res.Body); err == nil {
+			if err = f(doc); err != nil {
+				return
+			}
+		}
+	} else if err == nil {
 		err = errors.New(res.Status)
 	}
 	return

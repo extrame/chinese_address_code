@@ -6,7 +6,5 @@ import (
 )
 
 func TestSearch(t *testing.T) {
-	fmt.Println(Search("510781"))
-	fmt.Println(Search("110108"))
-	fmt.Println(Search("110120"))
+	fmt.Println(Search("460000"))
 }
