@@ -1,4 +1,4 @@
-package chinese_location_code
+package chinese_address_code
 
 import (
 	"encoding/json"
@@ -69,15 +69,24 @@ func Search(code string) (*Location, error) {
 		}
 	}()
 
-	if len(code) < 6 {
+	var ProvinceCode, sTypeCode, distinctCode = "00", "00", "00"
+
+	if len(code) < 2 {
 		return nil, errors.New("地区编码位数不足")
+	} else {
+		ProvinceCode = code[:2]
+		if len(code) >= 4 {
+			sTypeCode = code[2:4]
+		}
+		if len(code) >= 6 {
+			distinctCode = code[4:6]
+		}
 	}
-	ProvinceCode := code[:2]
-	sTypeCode := code[2:4]
+
 	if sTypeCode == "00" {
 		sTypeCode = "01"
 	}
-	distinctCode := code[4:6]
+
 	if distinctCode == "00" {
 		distinctCode = "01"
 	}

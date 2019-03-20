@@ -1,4 +1,4 @@
-package chinese_location_code
+package chinese_address_code
 
 import (
 	"fmt"
